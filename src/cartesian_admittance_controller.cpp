@@ -875,6 +875,9 @@ void CartesianAdmittanceController::parse_ft_sensor_() {
   auto msg = *ft_sensor_buffer_.readFromRT();
   ft_wrench_ << msg->wrench.force.x, msg->wrench.force.y, msg->wrench.force.z,
     msg->wrench.torque.x, msg->wrench.torque.y, msg->wrench.torque.z;
+  if (params_.ft_sensor.wrench_convention == "applied_to_environment") {
+    ft_wrench_ = -ft_wrench_;
+  }
 }
 
 void CartesianAdmittanceController::parse_target_adm_stiffness_() {
