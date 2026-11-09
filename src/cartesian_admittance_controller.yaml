@@ -480,6 +480,12 @@ cartesian_admittance_controller:
       type: string
       default_value: ""
       description: "Name of the F/T sensor measurement frame in the URDF. If empty, defaults to end_effector_frame (legacy behavior)."
+    wrench_convention:
+      type: string
+      default_value: "applied_to_robot"
+      description: "Sign convention of the F/T sensor wrench. 'applied_to_robot': the sensor reports the wrench the environment applies to the robot (used as is). 'applied_to_environment': the sensor reports the wrench the robot applies to the environment (sign is flipped)."
+      validation:
+        one_of<>: [["applied_to_robot", "applied_to_environment"]]
 
   variable_max_admittance_stiffness:
     translational:
