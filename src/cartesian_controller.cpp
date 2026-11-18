@@ -682,13 +682,15 @@ void CartesianController::parse_target_pose_() {
 void CartesianController::parse_target_joint_() {
   auto msg = *target_joint_buffer_.readFromRT();
   if (msg->position.size()) {
-    for (size_t i = 0; i < msg->position.size(); ++i) {
+    const auto size = std::min<size_t>(msg->position.size(), q_target.size());
+    for (size_t i = 0; i < size; ++i) {
       q_target[i] = msg->position[i];
     }
     /*filterJointValues(msg->name, msg->position, params_.joints, q_ref);*/
   }
   if (msg->velocity.size()) {
-    for (size_t i = 0; i < msg->position.size(); ++i) {
+    const auto size = std::min<size_t>(msg->velocity.size(), dq_ref.size());
+    for (size_t i = 0; i < size; ++i) {
       dq_ref[i] = msg->velocity[i];
     }
     /*filterJointValues(msg->name, msg->velocity, params_.joints, dq_ref);*/
