@@ -5,6 +5,7 @@
  * @brief Cartesian controller implementation for robot manipulation (supports impedance and OSC)
  */
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -143,10 +144,11 @@ private:
    */
   void parse_target_stiffness_();
 
-  bool new_target_pose_;
-  bool new_target_joint_;
-  bool new_target_wrench_;
-  bool new_target_stiffness_ = false;
+  // Written by the subscription callbacks, read by update().
+  std::atomic<bool> new_target_pose_{false};
+  std::atomic<bool> new_target_joint_{false};
+  std::atomic<bool> new_target_wrench_{false};
+  std::atomic<bool> new_target_stiffness_{false};
   bool use_topic_stiffness_ = false;
 
   realtime_tools::RealtimeBuffer<std::shared_ptr<geometry_msgs::msg::PoseStamped>>

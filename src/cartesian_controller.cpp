@@ -596,7 +596,37 @@ void CartesianController::updateCurrentState(bool initialize) {
 
 CallbackReturn
 CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_state*/) {
-  
+  // Do not start from missing or invalid joint states: the target pose comes from them.
+  for (size_t i = 0; i < state_interfaces_.size(); ++i) {
+#if ROS2_VERSION_ABOVE_HUMBLE
+    const auto value = state_interfaces_[i].get_optional();
+    const bool valid = value.has_value() && std::isfinite(value.value());
+#else
+    const bool valid = std::isfinite(state_interfaces_[i].get_value());
+#endif
+    if (!valid) {
+      RCLCPP_ERROR(
+        get_node()->get_logger(),
+        "State interface '%s' has no valid value. Refusing to activate.",
+        state_interfaces_[i].get_name().c_str());
+      return CallbackReturn::ERROR;
+    }
+  }
+
+  // Drop targets received while the controller was inactive and reset the
+  // values of the previous activation.
+  new_target_pose_ = false;
+  new_target_joint_ = false;
+  new_target_wrench_ = false;
+  new_target_stiffness_ = false;
+  use_topic_stiffness_ = false;
+  target_wrench_.setZero();
+  dq_ref.setZero();
+  tau_previous.setZero();
+
+  params_listener_->try_update_params(params_);
+  setStiffnessAndDamping();
+
   // Update the current state with initial measurements (no EMA filtering)
   // to avoid large initial errors
   updateCurrentState(true);
@@ -617,6 +647,25 @@ CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_stat
 
 controller_interface::CallbackReturn
 CartesianController::on_deactivate(const rclcpp_lifecycle::State & /*previous_state*/) {
+  // Do not leave the last torque on the command interfaces.
+  for (auto & command_interface : command_interfaces_) {
+#if ROS2_VERSION_ABOVE_HUMBLE
+    if (!command_interface.set_value(0.0)) {
+      RCLCPP_WARN(
+        get_node()->get_logger(), "Failed to set '%s' to zero on deactivation.",
+        command_interface.get_name().c_str());
+    }
+#else
+    command_interface.set_value(0.0);
+#endif
+  }
+
+  new_target_pose_ = false;
+  new_target_joint_ = false;
+  new_target_wrench_ = false;
+  new_target_stiffness_ = false;
+
+  RCLCPP_INFO(get_node()->get_logger(), "Controller deactivated.");
   return CallbackReturn::SUCCESS;
 }
 
