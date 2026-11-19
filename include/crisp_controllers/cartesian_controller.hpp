@@ -5,9 +5,11 @@
  * @brief Cartesian controller implementation for robot manipulation (supports impedance and OSC)
  */
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include <Eigen/Dense>  // NOLINT(build/include_order)
 
@@ -118,6 +120,12 @@ private:
   void setStiffnessAndDamping();
 
   /**
+   * @brief Set the nullspace weight of each joint from the parameters. Call it after a parameter
+   * change, not in every cycle: it looks up the joints by name.
+   */
+  void updateNullspaceWeights();
+
+  /**
    * @brief Get the current state of the robot from hardware interfaces and update internal variables
    * @param initialize If set to true, initialize the exponential moving average filter with the current state 
    */
@@ -143,10 +151,11 @@ private:
    */
   void parse_target_stiffness_();
 
-  bool new_target_pose_;
-  bool new_target_joint_;
-  bool new_target_wrench_;
-  bool new_target_stiffness_ = false;
+  // Written by the subscription callbacks, read by update().
+  std::atomic<bool> new_target_pose_{false};
+  std::atomic<bool> new_target_joint_{false};
+  std::atomic<bool> new_target_wrench_{false};
+  std::atomic<bool> new_target_stiffness_{false};
   bool use_topic_stiffness_ = false;
 
   realtime_tools::RealtimeBuffer<std::shared_ptr<geometry_msgs::msg::PoseStamped>>
@@ -196,6 +205,13 @@ private:
   Eigen::MatrixXd nullspace_stiffness;
   /** @brief Nullspace damping matrix for posture control */
   Eigen::MatrixXd nullspace_damping;
+  /** @brief Nullspace weight of each joint, set by updateNullspaceWeights() */
+  Eigen::VectorXd nullspace_weights_;
+
+  /** @brief Index in q_pin of each controller joint, set in on_configure() */
+  std::vector<int> joint_idx_q_;
+  /** @brief True for a continuous joint (two entries in q_pin), set in on_configure() */
+  std::vector<bool> joint_is_continuous_;
 
   /** @brief Current joint positions with dimension nv. */
   Eigen::VectorXd q;

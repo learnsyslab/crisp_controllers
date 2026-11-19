@@ -228,9 +228,8 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
 
   tau_previous = tau_d;
 
-  params_listener_->refresh_dynamic_parameters();
-  if (params_listener_->is_old(params_)) {
-    params_ = params_listener_->get_params();
+  if (params_listener_->try_update_params(params_)) {
+    updateNullspaceWeights();
     setStiffnessAndDamping();
   }
 
@@ -352,7 +351,18 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
 
   nullspace_stiffness = Eigen::MatrixXd::Zero(model_.nv, model_.nv);
   nullspace_damping = Eigen::MatrixXd::Zero(model_.nv, model_.nv);
+  nullspace_weights_ = Eigen::VectorXd::Zero(model_.nv);
 
+  // Look up the joints by name once: updateCurrentState() runs in the realtime loop.
+  joint_idx_q_.clear();
+  joint_is_continuous_.clear();
+  for (const auto & joint_name : params_.joints) {
+    const auto & joint = model_.joints[model_.getJointId(joint_name)];
+    joint_idx_q_.push_back(joint.idx_q());
+    joint_is_continuous_.push_back(continous_joint_types.count(joint.shortname()) > 0);
+  }
+
+  updateNullspaceWeights();
   setStiffnessAndDamping();
 
   new_target_pose_ = false;
@@ -543,26 +553,26 @@ void CartesianController::setStiffnessAndDamping() {
   nullspace_stiffness.setZero();
   nullspace_damping.setZero();
 
-  auto weights = Eigen::VectorXd(model_.nv);
-  for (size_t i = 0; i < params_.joints.size(); ++i) {
-    weights[i] = params_.nullspace.weights.joints_map.at(params_.joints.at(i)).value;
-  }
-  nullspace_stiffness.diagonal() << params_.nullspace.stiffness * weights;
+  nullspace_stiffness.diagonal() = params_.nullspace.stiffness * nullspace_weights_;
 
   // For nullspace, use explicit damping if > 0, otherwise compute from stiffness
   if (params_.nullspace.damping > 0) {
-    nullspace_damping.diagonal() = params_.nullspace.damping * weights;
+    nullspace_damping.diagonal() = params_.nullspace.damping * nullspace_weights_;
   } else {
     nullspace_damping.diagonal() = 2.0 * nullspace_stiffness.diagonal().cwiseSqrt();
+  }
+}
+
+void CartesianController::updateNullspaceWeights() {
+  for (size_t i = 0; i < params_.joints.size(); ++i) {
+    nullspace_weights_[i] = params_.nullspace.weights.joints_map.at(params_.joints.at(i)).value;
   }
 }
 
 void CartesianController::updateCurrentState(bool initialize) {
   auto num_joints = params_.joints.size();
   for (size_t i = 0; i < num_joints; i++) {
-    auto joint_name = params_.joints[i];
-    auto joint_id = model_.getJointId(joint_name);  // pinocchio joind id might be different
-    auto joint = model_.joints[joint_id];
+    const int idx_q = joint_idx_q_[i];  // pinocchio index might be different
 
 #if ROS2_VERSION_ABOVE_HUMBLE
     double q_meas = state_interfaces_[i].get_optional().value_or(q[i]);
@@ -580,12 +590,11 @@ void CartesianController::updateCurrentState(bool initialize) {
       ? q_meas
       : exponential_moving_average(q[i], q_meas, params_.filter.q);    
     
-    if (continous_joint_types.count(joint.shortname())) { // Then we are handling a continous
-                                                          // joint that is SO(2)
-      q_pin[joint.idx_q()] = std::cos(q[i]);
-      q_pin[joint.idx_q() + 1] = std::sin(q[i]);
+    if (joint_is_continuous_[i]) {  // continuous joint, SO(2)
+      q_pin[idx_q] = std::cos(q[i]);
+      q_pin[idx_q + 1] = std::sin(q[i]);
     } else {  // simple revolute joint case
-      q_pin[joint.idx_q()] = q[i];
+      q_pin[idx_q] = q[i];
     }
 
     dq[i] = initialize
@@ -598,7 +607,39 @@ void CartesianController::updateCurrentState(bool initialize) {
 
 CallbackReturn
 CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_state*/) {
-  
+  // Do not start from missing or invalid joint states: the target pose comes from them.
+  for (size_t i = 0; i < state_interfaces_.size(); ++i) {
+#if ROS2_VERSION_ABOVE_HUMBLE
+    const auto value = state_interfaces_[i].get_optional();
+    const bool valid = value.has_value() && std::isfinite(value.value());
+#else
+    const bool valid = std::isfinite(state_interfaces_[i].get_value());
+#endif
+    if (!valid) {
+      RCLCPP_ERROR(
+        get_node()->get_logger(),
+        "State interface '%s' has no valid value. Refusing to activate.",
+        state_interfaces_[i].get_name().c_str());
+      return CallbackReturn::ERROR;
+    }
+  }
+
+  // Drop targets received while the controller was inactive and reset the
+  // values of the previous activation.
+  new_target_pose_ = false;
+  new_target_joint_ = false;
+  new_target_wrench_ = false;
+  new_target_stiffness_ = false;
+  use_topic_stiffness_ = false;
+  target_wrench_.setZero();
+  dq_ref.setZero();
+  tau_previous.setZero();
+
+  if (params_listener_->try_update_params(params_)) {
+    updateNullspaceWeights();
+  }
+  setStiffnessAndDamping();
+
   // Update the current state with initial measurements (no EMA filtering)
   // to avoid large initial errors
   updateCurrentState(true);
@@ -613,12 +654,29 @@ CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_stat
   desired_position_ = target_position_;
   desired_orientation_ = target_orientation_;
 
-  RCLCPP_INFO(get_node()->get_logger(), "Controller activated.");
   return CallbackReturn::SUCCESS;
 }
 
 controller_interface::CallbackReturn
 CartesianController::on_deactivate(const rclcpp_lifecycle::State & /*previous_state*/) {
+  // Do not leave the last torque on the command interfaces.
+  for (auto & command_interface : command_interfaces_) {
+#if ROS2_VERSION_ABOVE_HUMBLE
+    if (!command_interface.set_value(0.0)) {
+      RCLCPP_WARN(
+        get_node()->get_logger(), "Failed to set '%s' to zero on deactivation.",
+        command_interface.get_name().c_str());
+    }
+#else
+    command_interface.set_value(0.0);
+#endif
+  }
+
+  new_target_pose_ = false;
+  new_target_joint_ = false;
+  new_target_wrench_ = false;
+  new_target_stiffness_ = false;
+
   return CallbackReturn::SUCCESS;
 }
 
@@ -635,13 +693,15 @@ void CartesianController::parse_target_pose_() {
 void CartesianController::parse_target_joint_() {
   auto msg = *target_joint_buffer_.readFromRT();
   if (msg->position.size()) {
-    for (size_t i = 0; i < msg->position.size(); ++i) {
+    const auto size = std::min<size_t>(msg->position.size(), q_target.size());
+    for (size_t i = 0; i < size; ++i) {
       q_target[i] = msg->position[i];
     }
     /*filterJointValues(msg->name, msg->position, params_.joints, q_ref);*/
   }
   if (msg->velocity.size()) {
-    for (size_t i = 0; i < msg->position.size(); ++i) {
+    const auto size = std::min<size_t>(msg->velocity.size(), dq_ref.size());
+    for (size_t i = 0; i < size; ++i) {
       dq_ref[i] = msg->velocity[i];
     }
     /*filterJointValues(msg->name, msg->velocity, params_.joints, dq_ref);*/
