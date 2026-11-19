@@ -34,7 +34,7 @@
 #include "crisp_controllers/utils/torque_rate_saturation.hpp"
 
 #if HAS_ROS2_CONTROL_INTROSPECTION
-#include <hardware_interface/introspection.hpp>
+#include <pal_statistics/pal_statistics.hpp>
 #endif
 
 namespace crisp_controllers {
@@ -233,6 +233,12 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
     params_ = params_listener_->get_params();
     setStiffnessAndDamping();
   }
+
+#if HAS_ROS2_CONTROL_INTROSPECTION
+  if (debug_registry_) {
+    debug_registry_->publishAsync();
+  }
+#endif
 
   log_debug_info(time);
 
@@ -472,27 +478,37 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
   nullspace_projection = Eigen::MatrixXd::Identity(model_.nv, model_.nv);
 
 #if HAS_ROS2_CONTROL_INTROSPECTION
+  debug_registry_.reset();
   if (params_.enable_introspection) {
-    RCLCPP_INFO(get_node()->get_logger(), "Enabling ROS2 Control Introspection for debugging.");
-    this->enable_introspection(true);
+    // Own registry instead of the ros2_control registry: the controller manager enables and
+    // disables the values of that registry at each switch, in the realtime loop.
+    debug_registry_ =
+      std::make_shared<pal_statistics::StatisticsRegistry>(get_node(), "~/introspection_data");
+    auto register_value = [this](const std::string & name, const double * value) {
+      debug_registry_->registerVariable(name, value);
+    };
     for (int i = 0; i < tau_task.size(); ++i) {
-      REGISTER_ROS2_CONTROL_INTROSPECTION("tau_task_" + std::to_string(i), &tau_task[i]);
-      REGISTER_ROS2_CONTROL_INTROSPECTION("tau_desired_" + std::to_string(i), &tau_d[i]);
+      register_value("tau_task_" + std::to_string(i), &tau_task[i]);
+      register_value("tau_desired_" + std::to_string(i), &tau_d[i]);
     }
     for (int i = 0; i < error.size(); ++i) {
-      REGISTER_ROS2_CONTROL_INTROSPECTION("error_" + std::to_string(i), &error[i]);
+      register_value("error_" + std::to_string(i), &error[i]);
     }
-    REGISTER_ROS2_CONTROL_INTROSPECTION("target_position_x", &target_position_[0]);
-    REGISTER_ROS2_CONTROL_INTROSPECTION("target_position_y", &target_position_[1]);
-    REGISTER_ROS2_CONTROL_INTROSPECTION("target_position_z", &target_position_[2]);
+    register_value("target_position_x", &target_position_[0]);
+    register_value("target_position_y", &target_position_[1]);
+    register_value("target_position_z", &target_position_[2]);
     for (int i = 0; i < target_orientation_.coeffs().size(); ++i) {
-      REGISTER_ROS2_CONTROL_INTROSPECTION(
+      register_value(
         "target_orientation_" + std::to_string(i), &target_orientation_.coeffs()[i]);
     }
     for (int i = 0; i < q_target.size(); ++i) {
-      REGISTER_ROS2_CONTROL_INTROSPECTION("q_target_" + std::to_string(i), &q_target[i]);
-      REGISTER_ROS2_CONTROL_INTROSPECTION("q_ref_" + std::to_string(i), &q_ref[i]);
+      register_value("q_target_" + std::to_string(i), &q_target[i]);
+      register_value("q_ref_" + std::to_string(i), &q_ref[i]);
     }
+    debug_registry_->startPublishThread();
+    RCLCPP_INFO(
+      get_node()->get_logger(), "Debug values are published on '%s/introspection_data/full'.",
+      get_node()->get_fully_qualified_name());
   } else {
     RCLCPP_INFO(get_node()->get_logger(), "ROS2 Control Introspection is disabled.");
   }

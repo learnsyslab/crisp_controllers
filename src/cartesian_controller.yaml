@@ -354,4 +354,4 @@ cartesian_controller:
   enable_introspection:
     type: bool
     default_value: false
-    description: "Whether or not to enable introspection for this controller. This will allow us to visualize the internal state of the controller in plotjuggler using the introspection topics."
+    description: "Whether or not to publish the internal state of this controller for debugging, e.g. in plotjuggler. The values are published on '<controller name>/introspection_data/full'."
