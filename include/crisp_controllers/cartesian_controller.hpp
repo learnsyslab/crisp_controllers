@@ -21,6 +21,12 @@
 
 #include <crisp_controllers/utils/ros2_version.hpp>
 
+#if HAS_ROS2_CONTROL_INTROSPECTION
+namespace pal_statistics {
+class StatisticsRegistry;
+}  // namespace pal_statistics
+#endif
+
 #if ROS2_VERSION_ABOVE_HUMBLE
 #include <crisp_controllers/cartesian_controller_parameters.hpp>
 #else
@@ -196,6 +202,15 @@ private:
   Eigen::MatrixXd nullspace_stiffness;
   /** @brief Nullspace damping matrix for posture control */
   Eigen::MatrixXd nullspace_damping;
+
+#if HAS_ROS2_CONTROL_INTROSPECTION
+  /**
+   * @brief Registry of the debug values, created in on_configure() if enable_introspection is
+   * set. It is not the shared ros2_control registry: an activation or deactivation of the
+   * controller does not change it.
+   */
+  std::shared_ptr<pal_statistics::StatisticsRegistry> debug_registry_;
+#endif
 
   /** @brief Current joint positions with dimension nv. */
   Eigen::VectorXd q;
